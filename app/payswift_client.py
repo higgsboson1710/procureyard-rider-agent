@@ -27,7 +27,7 @@ class PaySwiftClient:
         GET /v1/payouts?rider_id={rider_id}
         """
         url = f"{self.base_url}/v1/payouts"
-        params = {"rider_id": rider_id}
+        params = {"rider_id": rider_id} if rider_id else {}
 
         for attempt in range(1, max_retries + 1):
             try:

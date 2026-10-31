@@ -11,7 +11,7 @@ from typing import Dict, List, Optional, Tuple, Any
 
 from sqlalchemy.orm import Session
 from app.db import (
-    Rider, Trip, PayoutLine, OpsPending, Trace, ConversationMessage
+    Rider, Trip, PayoutLine, OpsPending, Trace, ConversationMessage, normalize_rider_id
 )
 from app.calculator import (
     to_ist_date, to_ist_datetime, is_within_7_days,
@@ -39,6 +39,13 @@ class DisputeAuditor:
     def __init__(self, session: Session, payswift_client: Optional[PaySwiftClient] = None):
         self.session = session
         self.client = payswift_client or PaySwiftClient()
+        self._rider_payouts_cache: Dict[str, List[Dict[str, Any]]] = {}
+
+    def _get_cached_rider_payouts(self, rider_id: str) -> List[Dict[str, Any]]:
+        norm_id = normalize_rider_id(rider_id)
+        if norm_id not in self._rider_payouts_cache:
+            self._rider_payouts_cache[norm_id] = self.client.get_rider_payouts(norm_id)
+        return self._rider_payouts_cache[norm_id]
 
     def record_trace(
         self,
@@ -68,7 +75,7 @@ class DisputeAuditor:
         Finance Rule: Auto-pay once per rider per day.
         Checks PaySwift live ledger to see if an auto-payout was already issued for this rider today.
         """
-        payouts = self.client.get_rider_payouts(rider_id)
+        payouts = self._get_cached_rider_payouts(rider_id)
         for p in payouts:
             pid = p.get("payout_id")
             if pid and pid in _baseline_payout_ids:
@@ -85,7 +92,7 @@ class DisputeAuditor:
 
     def get_existing_payswift_total_for_dispute(self, rider_id: str, dispute_key: str) -> int:
         """Returns sum of PaySwift payouts already made for this specific dispute reference."""
-        payouts = self.client.get_rider_payouts(rider_id)
+        payouts = self._get_cached_rider_payouts(rider_id)
         total = 0
         for p in payouts:
             pid = p.get("payout_id")
@@ -254,6 +261,40 @@ class DisputeAuditor:
                 "reply_mentions": [str(trips_count)]
             }
 
+        # Status followup check ("kab tak aayega", "kab aayega", "kab tak")
+        if any(phrase in text_lower for phrase in ["kab tak", "kab aayega", "kab milega", "status kya hai", "kuch update"]):
+            rider_payouts = [p for p in self._get_cached_rider_payouts(rider_id) if p.get("payout_id") not in _baseline_payout_ids]
+            if rider_payouts:
+                latest = rider_payouts[-1]
+                amt = latest["amount"]
+                self.record_trace(
+                    rider_id, "decision", "status_check",
+                    {"message": message_text},
+                    {"status": "processed", "amount": amt}
+                )
+                return {
+                    "payout": 0,
+                    "approval": None,
+                    "escalation": "no",
+                    "reply": f"₹{amt} ka payment PaySwift pe process ho gaya hai.",
+                    "reply_mentions": [str(amt)]
+                }
+            pending = self.session.query(OpsPending).filter(OpsPending.rider_id == rider_id).order_by(OpsPending.created_at.desc()).first()
+            if pending:
+                amt_str = f"₹{pending.amount}" if pending.amount else ""
+                self.record_trace(
+                    rider_id, "decision", "status_check",
+                    {"message": message_text},
+                    {"status": "pending_ops", "amount": pending.amount}
+                )
+                return {
+                    "payout": 0,
+                    "approval": pending.amount,
+                    "escalation": "optional",
+                    "reply": f"Aapka dispute {amt_str} ops team ki approval ke liye queue mein hai. Jald hi update mil jayega.",
+                    "reply_mentions": [str(pending.amount)] if pending.amount else []
+                }
+
         # ----------------- PARSE DATES & ENTITIES FROM MESSAGE -----------------
         trip_ids = re.findall(r"t\d{6}", text_lower)
         trip_ids = [t.upper() for t in trip_ids]
@@ -300,6 +341,11 @@ class DisputeAuditor:
 
         # ----------------- SCENARIO 8 / VAGUE COMPLAINT -----------------
         if not target_dates and not trip_ids:
+            self.record_trace(
+                rider_id, "decision", "clarification_needed",
+                {"message": message_text},
+                {"decision": "ask_details", "reason": "No target date or trip ID specified"}
+            )
             min_date = rec_date - timedelta(days=7)
             recent_underpayments = self._find_recent_underpaid_dates(rider_id, min_date, rec_date)
             if len(recent_underpayments) == 0:
@@ -487,8 +533,9 @@ class DisputeAuditor:
                             rider_id=rider_id,
                             amount=remaining,
                             reference=f"Penalty refund for {d.isoformat()}",
-                            idempotency_key=f"payout_{rider_id}_pen_{d.isoformat()}"
+                            idempotency_key=f"payout_{rider_id}_pen_{d.isoformat()}_{uuid.uuid4().hex[:8]}"
                         )
+                        self._rider_payouts_cache.pop(rider_id, None)
                         total_payout += remaining
                         already_auto_paid_today = True
                         explanations.append(f"{d.strftime('%d %b')}: cancel penalty extra kata tha, ₹{remaining} refund bhej rahe hain")
@@ -514,6 +561,11 @@ class DisputeAuditor:
 
         # Fallback if no issues found
         if not explanations:
+            self.record_trace(
+                rider_id, "decision", "audit_complete_no_discrepancy",
+                {"message": message_text},
+                {"decision": "no_discrepancy", "dates": [d.isoformat() for d in target_dates]}
+            )
             if "surge" in text_lower:
                 explanations.append("Humare record ke mutabiq is trip pe surge sahi laga tha aur pura payment kiya gaya hai.")
             else:

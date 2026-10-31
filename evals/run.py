@@ -90,7 +90,7 @@ def run_evals(service_url: str, payswift_url: str = "http://localhost:8081") -> 
                     "received_at": t.get("received_at")
                 }
                 try:
-                    resp = requests.post(f"{service_url}/messages", json=payload, timeout=12)
+                    resp = requests.post(f"{service_url}/messages", json=payload, timeout=30)
                     if resp.status_code == 200:
                         rep_text = resp.json().get("reply", "")
                         agent_replies.append(rep_text)

@@ -97,6 +97,8 @@ def handle_message(req: MessageRequest, db: Session = Depends(get_db)):
         )
         return MessageResponse(reply=reply_text)
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         # Fallback friendly response
         return MessageResponse(reply="Aapka message mil gaya hai. Ops team ise review kar rahi hai.")
 

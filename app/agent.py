@@ -240,6 +240,21 @@ class DisputeAgent:
             except Exception as e:
                 logger.warning(f"Failed to parse Groq NLU output: {e}")
 
+        session: Session = self.session_factory()
+        try:
+            tr = Trace(
+                rider_id=rider_id,
+                at=datetime.now(IST).isoformat(),
+                type="nlu",
+                name="extract_intent",
+                input=json.dumps({"message": text}, ensure_ascii=False),
+                output=json.dumps(extracted, ensure_ascii=False) if extracted else None
+            )
+            session.add(tr)
+            session.commit()
+        finally:
+            session.close()
+
         return {"extracted_nlu": extracted}
 
     def audit_and_decide_node(self, state: AgentState) -> Dict[str, Any]:
