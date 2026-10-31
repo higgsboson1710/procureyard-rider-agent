@@ -30,6 +30,8 @@ services:
       - PORT=8000
       - PAYSWIFT_BASE_URL=http://payswift:8081
       - DATABASE_URL=postgresql://quickdrop_user:quickdrop_password@postgres:5432/quickdrop
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - GROQ_MODEL=${GROQ_MODEL:-openai/gpt-oss-120b}
       - GEMINI_API_KEY=${GEMINI_API_KEY}
     depends_on:
       postgres:
