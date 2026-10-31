@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 
 from app.db import (
     init_db, seed_data_if_empty, get_db,
-    ConversationMessage, Trace, OpsPending
+    ConversationMessage, Trace, OpsPending, normalize_rider_id
 )
 from app.agent import DisputeAgent
 from app.payswift_client import PaySwiftClient
@@ -58,6 +58,22 @@ def health_check():
     return {"status": "ok"}
 
 
+@app.post("/admin/reset")
+def reset_system(db: Session = Depends(get_db)):
+    """
+    Resets the desk state to clean fresh state:
+    - Clears conversation messages, traces, and ops_pending
+    - Snapshots PaySwift existing payouts so each scenario runs isolated
+    """
+    from app.tools import reset_payswift_baseline
+    db.query(ConversationMessage).delete()
+    db.query(Trace).delete()
+    db.query(OpsPending).delete()
+    db.commit()
+    reset_payswift_baseline()
+    return {"status": "reset_complete"}
+
+
 @app.post("/messages", response_model=MessageResponse)
 def handle_message(req: MessageRequest, db: Session = Depends(get_db)):
     """
@@ -91,8 +107,9 @@ def get_trace(rider_id: str, db: Session = Depends(get_db)):
     Returns ordered audit trace of all steps performed for this rider.
     Shape: [{"at": "...", "type": "...", "name": "...", "input": {...}, "output": {...}}]
     """
+    norm_id = normalize_rider_id(rider_id)
     traces = db.query(Trace).filter(
-        Trace.rider_id == rider_id
+        Trace.rider_id == norm_id
     ).order_by(Trace.id.asc()).all()
 
     results = []

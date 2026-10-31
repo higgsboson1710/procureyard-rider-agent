@@ -34,10 +34,9 @@ class PaySwiftClient:
                 resp = requests.get(url, params=params, timeout=5)
                 if resp.status_code == 200:
                     data = resp.json()
-                    # PaySwift returns a list or dict with payouts list
                     if isinstance(data, list):
                         return data
-                    return data.get("payouts", [])
+                    return data.get("data", data.get("payouts", []))
                 elif resp.status_code in (429, 500, 502, 503, 504):
                     logger.warning("PaySwift GET returned status %d. Retry %d/%d", resp.status_code, attempt, max_retries)
                     time.sleep(0.5 * (2 ** (attempt - 1)))
@@ -81,7 +80,7 @@ class PaySwiftClient:
         for attempt in range(1, max_retries + 1):
             try:
                 resp = requests.post(url, json=payload, headers=headers, timeout=8)
-                if resp.status_code == 201:
+                if resp.status_code in (200, 201):
                     return resp.json()
                 elif resp.status_code == 409:
                     # Idempotent replay: already processed

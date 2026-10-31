@@ -21,6 +21,20 @@ from app.calculator import (
 from app.payswift_client import PaySwiftClient
 
 
+# Global baseline set for PaySwift payouts to ignore (from previous test runs / scenarios)
+_baseline_payout_ids = set()
+
+def reset_payswift_baseline(client: Optional[PaySwiftClient] = None):
+    """Snapshots all current payout IDs in PaySwift into the baseline set."""
+    global _baseline_payout_ids
+    c = client or PaySwiftClient()
+    try:
+        all_p = c.get_rider_payouts("")
+        _baseline_payout_ids = {p.get("payout_id") for p in all_p if p.get("payout_id")}
+    except Exception:
+        _baseline_payout_ids = set()
+
+
 class DisputeAuditor:
     def __init__(self, session: Session, payswift_client: Optional[PaySwiftClient] = None):
         self.session = session
@@ -56,6 +70,9 @@ class DisputeAuditor:
         """
         payouts = self.client.get_rider_payouts(rider_id)
         for p in payouts:
+            pid = p.get("payout_id")
+            if pid and pid in _baseline_payout_ids:
+                continue
             created = p.get("created_at") or p.get("at")
             if created:
                 try:
@@ -71,6 +88,9 @@ class DisputeAuditor:
         payouts = self.client.get_rider_payouts(rider_id)
         total = 0
         for p in payouts:
+            pid = p.get("payout_id")
+            if pid and pid in _baseline_payout_ids:
+                continue
             ref = p.get("reference", "")
             if dispute_key in ref:
                 total += int(p.get("amount", 0))
@@ -239,8 +259,11 @@ class DisputeAuditor:
         trip_ids = [t.upper() for t in trip_ids]
 
         target_dates = []
-        date_matches = re.findall(r"(\d{1,2})\s*(?:sept|sep|tarikh|tarik|ko|wala|\.|$)", text_lower)
-        for dm in date_matches:
+        # Match dates like: "19 sept", "19th", "20 tarikh", "20 tarik", "20 ko", "20 wala"
+        # Never match naked decimal numbers (e.g. 7.4 km)
+        date_matches = re.findall(r"\b(\d{1,2})(?:st|nd|rd|th)?\s*(?:sept(?:ember)?|sep|tarikh|tarik|ko|wala)\b", text_lower)
+        ordinal_matches = re.findall(r"\b(?:on\s+)?(\d{1,2})(?:st|nd|rd|th)\b", text_lower)
+        for dm in (date_matches + ordinal_matches):
             d_int = int(dm)
             if 1 <= d_int <= 31:
                 target_dates.append(date(2026, 9, d_int))
@@ -249,6 +272,13 @@ class DisputeAuditor:
             target_dates.append(rec_date - timedelta(days=1))
         if "aaj" in text_lower:
             target_dates.append(rec_date)
+
+        # If trip IDs are specified in message, get their dates directly from DB
+        if trip_ids:
+            for tid in trip_ids:
+                trip = self.session.query(Trip).filter(Trip.trip_id == tid, Trip.rider_id == rider_id).first()
+                if trip and trip.ist_date not in target_dates:
+                    target_dates.append(trip.ist_date)
 
         target_dates = list(set(target_dates))
 
@@ -371,8 +401,9 @@ class DisputeAuditor:
                         rider_id=rider_id,
                         amount=total_trip_remaining,
                         reference=f"Trips {trips_label} underpayment on {d.isoformat()}",
-                        idempotency_key=f"payout_{rider_id}_{d.isoformat()}_{total_trip_remaining}"
+                        idempotency_key=f"payout_{rider_id}_{d.isoformat()}_{uuid.uuid4().hex[:8]}"
                     )
+                    self._rider_payouts_cache.pop(rider_id, None)
                     total_payout += total_trip_remaining
                     already_auto_paid_today = True
                     explanations.append(f"{d.strftime('%d %b')}: orders {trips_label} pe ₹{total_trip_remaining} bhej rahe hain")
@@ -414,8 +445,9 @@ class DisputeAuditor:
                             rider_id=rider_id,
                             amount=remaining,
                             reference=f"Daily incentive for {d.isoformat()}",
-                            idempotency_key=f"payout_{rider_id}_inc_{d.isoformat()}"
+                            idempotency_key=f"payout_{rider_id}_inc_{d.isoformat()}_{uuid.uuid4().hex[:8]}"
                         )
+                        self._rider_payouts_cache.pop(rider_id, None)
                         total_payout += remaining
                         already_auto_paid_today = True
                         explanations.append(f"{d.strftime('%d %b')} ka incentive ₹{remaining} bhej diya gaya hai")

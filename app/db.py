@@ -20,6 +20,14 @@ Base = declarative_base()
 
 # ----------------- Models -----------------
 
+def normalize_rider_id(rider_id: str) -> str:
+    """Normalizes rider ID to standard R001-R040 format (handling R7 -> R007, r19 -> R019)."""
+    r = rider_id.strip().upper()
+    if r.startswith("R") and r[1:].isdigit():
+        return f"R{int(r[1:]):03d}"
+    return r
+
+
 class Rider(Base):
     __tablename__ = "riders"
     rider_id = Column(String(50), primary_key=True, index=True)
@@ -128,6 +136,17 @@ def get_db():
         session.close()
 
 
+def reseed_db():
+    """Drops all tables and re-seeds cleanly."""
+    global _engine
+    if _engine is None:
+        init_db()
+    Base.metadata.drop_all(_engine)
+    Base.metadata.create_all(_engine)
+    seed_data_if_empty()
+
+
+
 def get_db_session():
     if _SessionFactory is None:
         init_db()
@@ -183,14 +202,17 @@ def seed_data_if_empty(base_data_dir: Optional[str] = None):
                     seen_trips.add(tid)
                     started_dt = to_ist_datetime(row["started_at"])
                     ist_d = started_dt.date()
+                    raw_dist = float(row["distance_km"])
+                    # Some loggers record meters instead of km (e.g. 5000 -> 5.0)
+                    dist_km = raw_dist / 1000.0 if raw_dist > 50.0 else raw_dist
                     trips.append(
                         Trip(
                             trip_id=tid,
-                            rider_id=row["rider_id"],
+                            rider_id=normalize_rider_id(row["rider_id"]),
                             started_at=started_dt,
                             ist_date=ist_d,
                             status=row["status"],
-                            distance_km=float(row["distance_km"]),
+                            distance_km=dist_km,
                             surge_multiplier=float(row["surge_multiplier"])
                         )
                     )
@@ -213,7 +235,7 @@ def seed_data_if_empty(base_data_dir: Optional[str] = None):
                         PayoutLine(
                             line_id=lid,
                             payout_date=date.fromisoformat(row["payout_date"]),
-                            rider_id=row["rider_id"],
+                            rider_id=normalize_rider_id(row["rider_id"]),
                             line_type=row["line_type"],
                             trip_id=row["trip_id"] if row["trip_id"] else None,
                             amount=int(row["amount"])
@@ -224,3 +246,14 @@ def seed_data_if_empty(base_data_dir: Optional[str] = None):
 
     finally:
         session.close()
+
+
+def reseed_db():
+    """Drops all tables and re-seeds cleanly."""
+    global _engine
+    if _engine is None:
+        init_db()
+    Base.metadata.drop_all(_engine)
+    Base.metadata.create_all(_engine)
+    seed_data_if_empty()
+
